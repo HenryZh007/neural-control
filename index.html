@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Neural Control: Adjoint Learning Through Equilibrium Constraints</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="nav-container">
+    <a href="index.html" class="brand">Neural Control</a>
+    <nav class="site-nav">
+      <a href="index.html" class="active">Home</a>
+      <a href="about.html">About</a>
+      <a href="https://arxiv.org/abs/2605.03288">Pub</a>
+      <a href="#">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<section class="hero">
+  <div class="hero-media hero-split">
+    <div class="hero-cell">
+      <img src="simulation_results/ribbon_animation_U.gif" alt="Ribbon shape control: U" class="hero-image">
+    </div>
+    <div class="hero-cell">
+      <img src="simulation_results/ribbon_animation_M.gif" alt="Ribbon shape control: M" class="hero-image">
+    </div>
+    <div class="hero-overlay"></div>
+  </div>
+  <div class="hero-text">
+    <h1>Neural Control</h1>
+    <p class="subtitle">Adjoint Learning Through Equilibrium Constraints</p>
+    <a href="about.html" class="btn-hero">Learn more &rarr;</a>
+  </div>
+</section>
+
+<section class="tasks">
+
+  <div class="tasks-intro">
+    <h2>Overview</h2>
+    <p>
+      We present <strong>Neural Control</strong>, an adjoint-based learning framework
+      for controlling soft, deformable structures whose dynamics are governed by static
+      equilibrium constraints. By differentiating through the equilibrium via implicit
+      differentiation and pairing it with receding-horizon control, our method avoids
+      unrolling expensive forward simulations and scales to high-dimensional shape
+      objectives. We validate the approach on three representative tasks &mdash; node
+      targeting, trajectory tracing, and shape control &mdash; where it achieves
+      orders-of-magnitude lower tracking error at a fraction of the compute cost of
+      derivative-free baselines.
+    </p>
+  </div>
+
+  <div class="task-block">
+    <div class="task-intro">
+      <h2>Task 1 &mdash; Node Targeting</h2>
+      <p>
+        Drive a selected node of an elastic strip to a prescribed target position.
+        The four examples below highlight different initial configurations and target
+        locations, demonstrating that Neural Control converges to the goal across
+        diverse boundary conditions.
+      </p>
+    </div>
+    <div class="gif-grid grid-2x2">
+      <figure>
+        <img src="experimental_results/Task1_case1/case_1_sample.gif" alt="Task 1, case 1">
+        <figcaption>Example 1</figcaption>
+      </figure>
+      <figure>
+        <img src="experimental_results/Task1_case2/case_2_sample.gif" alt="Task 1, case 2">
+        <figcaption>Example 2</figcaption>
+      </figure>
+      <figure>
+        <img src="experimental_results/Task1_case3/case_3_sample.gif" alt="Task 1, case 3">
+        <figcaption>Example 3</figcaption>
+      </figure>
+      <figure>
+        <img src="experimental_results/Task1_case4/case_4_sample.gif" alt="Task 1, case 4" style="object-position: center 25%;">
+        <figcaption>Example 4</figcaption>
+      </figure>
+    </div>
+  </div>
+
+  <div class="task-block">
+    <div class="task-intro">
+      <h2>Task 2 &mdash; Trajectory Tracing</h2>
+      <p>
+        Trace the middle node of an elastic strip along a prescribed trajectory over
+        time. The two examples below show tracking on curves with distinct curvature
+        profiles, showing accurate trajectory following throughout the rollout.
+      </p>
+    </div>
+    <div class="gif-grid grid-2">
+      <figure>
+        <img src="experimental_results/Task2_case1/t2c1_sample.gif" alt="Task 2, case 1" style="object-position: center 10%;">
+        <figcaption>Example 1</figcaption>
+      </figure>
+      <figure>
+        <img src="experimental_results/Task2_case2/t2c2_sample.gif" alt="Task 2, case 2" style="object-position: center 20%;">
+        <figcaption>Example 2</figcaption>
+      </figure>
+    </div>
+  </div>
+
+  <div class="task-block">
+    <div class="task-intro">
+      <h2>Task 3 &mdash; Shape Control</h2>
+      <p>
+        Deform an entire elastic strip toward a prescribed target configuration.
+        This task requires coordinated control of the full body of the structure
+        rather than a single node, illustrating the scalability of Neural Control
+        to high-dimensional shape objectives.
+      </p>
+    </div>
+    <div class="gif-grid grid-1">
+      <figure>
+        <img src="experimental_results/Task3/t3_sample.gif" alt="Task 3" style="object-position: 25% 85%;">
+        <figcaption>Shape control of the elastic strip</figcaption>
+      </figure>
+    </div>
+  </div>
+
+</section>
+
+<section class="authors">
+  <h2>Authors</h2>
+  <p class="author-line">
+    <a href="https://scholar.google.com/citations?user=LF8G-TgAAAAJ&hl=en">Dezhong Tong</a>,
+    <a href="https://chiawenwang.github.io/">Jiawen Wang</a>,
+    <a href="https://henryzh007.github.io/">Hengyi Zhou</a>,
+    <span class="fake-link">Yinlong Shen</span>,
+    <a href="https://scholar.google.com/citations?user=MNKU_WcAAAAJ&hl=en&oi=ao">Xiaonan Huang</a>,
+    <a href="https://structures.computer/">M. Khalid Jawed</a>
+  </p>
+</section>
+
+<section class="citation">
+  <h2>Citation</h2>
+  <p>If you find this work useful, please cite:</p>
+  <div class="bib-block">
+    <button class="copy-btn" onclick="copyBib()">Copy</button>
+<pre id="bibtex">@inproceedings{neuralcontrol2026,
+  title     = {Neural Control: Adjoint Learning Through Equilibrium Constraints},
+  author    = {Dezhong Tong, Jiawen Wang, Hengyi Zhou, Yinlong Shen, Xiaonan Huang, M. Khalid Jawed},
+  booktitle = {Proceedings of the International Conference on Machine Learning (ICML)},
+  year      = {2026}
+}</pre>
+  </div>
+</section>
+
+<footer class="site-footer">
+  <p>Built with GitHub Pages.</p>
+</footer>
+
+<script>
+window.addEventListener('load', () => {
+  const imgs = document.querySelectorAll('.hero-cell .hero-image');
+  if (imgs.length < 2) return;
+  const stamp = Date.now();
+  const sources = Array.from(imgs).map(img => img.src.split('?')[0] + '?t=' + stamp);
+  let loaded = 0;
+  const tmp = sources.map(src => {
+    const im = new Image();
+    im.src = src;
+    im.onload = im.onerror = () => {
+      if (++loaded === sources.length) {
+        imgs.forEach((img, i) => { img.src = sources[i]; });
+      }
+    };
+    return im;
+  });
+});
+
+function copyBib() {
+  const text = document.getElementById('bibtex').innerText;
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = document.querySelector('.copy-btn');
+    const orig = btn.innerText;
+    btn.innerText = 'Copied!';
+    setTimeout(() => btn.innerText = orig, 1500);
+  });
+}
+</script>
+
+</body>
+</html>

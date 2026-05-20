@@ -1,0 +1,503 @@
+import os, math, copy, time, random, sys
+from typing import Optional
+import numpy as np
+import torch
+import torch.nn as nn
+
+import nn_der.nn_der as py_der
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from utils import create_policy_model
+from trajectory import generate_trajectory, get_trajectory_description
+
+
+# =============================================================================
+# Configuration - All parameters
+# =============================================================================
+CONFIG = {
+    # Trajectory types to test: 'sin', 'cos', 'triangle', 'semicircle', 'square'
+    "trajectory_types": ["square", "cos", "triangle", "semicircle"],
+    
+    # Trajectory-specific parameters
+    "trajectory_params": {
+        # For sin/cos trajectories
+        "amplitude": 0.05,          # Wave amplitude
+        "frequency": 3.0,           # Wave frequency (number of cycles)
+        
+        # For triangle wave
+        "period": 0.5,              # Period of triangle wave
+        
+        # For semicircle
+        "radius": 0.25,             # Radius of semicircle
+        "direction": "down",        # 'up' or 'down'
+        
+        # For square wave
+        "square_amplitude": 0.12,   # Amplitude of square wave
+        "num_segments": 10,         # Number of segments
+    },
+    
+    # Target node index (which node to track)
+    "target_index": 50,
+    
+    # Optimization parameters
+    "T": 101,                       # Number of time steps
+    "learning_rate": 0.01,
+    "iteration_number": 100,          # Stop after this many iterations
+    "loss_threshold": 1e-7,
+    
+    # Network parameters
+    "hidden_sizes": [64, 64],
+    
+    # SPSA parameters
+    "spsa_c": 5e-3,                 # Perturbation magnitude
+    "spsa_m": 2,                    # Number of SPSA pairs to average
+}
+
+
+# =============================================================================
+# Thread safety / stability
+# =============================================================================
+def configure_threads(num_threads: int = 1) -> None:
+    os.environ.setdefault("OMP_NUM_THREADS", str(num_threads))
+    os.environ.setdefault("MKL_NUM_THREADS", str(num_threads))
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", str(num_threads))
+    os.environ.setdefault("NUMEXPR_NUM_THREADS", str(num_threads))
+    torch.set_num_threads(num_threads)
+    torch.set_num_interop_threads(num_threads)
+
+
+def set_seed(seed: int = 42, deterministic: bool = True):
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    if deterministic:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        torch.use_deterministic_algorithms(True, warn_only=True)
+
+
+# =============================================================================
+# Simulator helper functions
+# =============================================================================
+def resetSim(sim_manager):
+    sim_manager.resetSim()
+
+
+# =============================================================================
+# Parameter vector helpers for SPSA
+# =============================================================================
+def parameters_to_vector(params):
+    """Flatten a list of parameters into one 1D tensor (on same device)."""
+    return torch.cat([p.detach().reshape(-1) for p in params])
+
+
+@torch.no_grad()
+def set_params_from_vector_(params, vec):
+    """In-place: params <- vec (flat)."""
+    offset = 0
+    for p in params:
+        n = p.numel()
+        p.copy_(vec[offset:offset + n].view_as(p))
+        offset += n
+
+
+def vector_to_grads_list(params, gvec):
+    """Split a flat vector into a list of tensors matching params."""
+    grads = []
+    offset = 0
+    for p in params:
+        n = p.numel()
+        grads.append(gvec[offset:offset + n].view_as(p).clone())
+        offset += n
+    return grads
+
+
+# =============================================================================
+# Black-box rollout loss for trajectory tracking (no Jacobians, no adjoint)
+# =============================================================================
+@torch.no_grad()
+def loss_only_forward(
+    policy_model: torch.nn.Module,
+    lams: torch.Tensor,       # (T,)
+    sim_manager,
+    target: np.ndarray,       # (T, 2) - target trajectory
+    target_index: int,        # node index to track
+    dlam: float,
+    fail_loss: float = 1e6,   # penalty if sim fails
+):
+    """
+    Returns trajectory tracking loss: sum over all timesteps of 0.5*||x_target - x_node||^2 * dlam.
+    """
+    policy_model.eval()
+    T = int(lams.numel())
+
+    # (T, 2)
+    u_seq = policy_model(lams.view(T, 1)).cpu().numpy()
+
+    sim_manager.resetSim()
+    verts0 = np.asarray(sim_manager.getAllVertices()).copy()[:, :2]
+    xb_k = verts0[[0, 1, -2, -1], :].reshape(-1).copy()  # (8,)
+
+    L_total = 0.0
+
+    for i in range(T):
+        uk = u_seq[i]
+        dx1, dx2 = uk * dlam
+
+        v0 = xb_k[0:2].copy()
+        v1 = xb_k[2:4].copy()
+        v2 = xb_k[4:6].copy()
+        v3 = xb_k[6:8].copy()
+
+        # only move x
+        v0[0] += dx1; v1[0] += dx1
+        v2[0] += dx2; v3[0] += dx2
+
+        xb_k = np.hstack((v0, v1, v2, v3))
+
+        sim_manager.setControlInputs(np.ascontiguousarray(xb_k.reshape(-1, 2), dtype=np.float64))
+        try:
+            sim_manager.step()
+        except Exception:
+            return float(fail_loss)
+
+        verts_xy = np.asarray(sim_manager.getAllVertices()).copy()[:, :2]
+        
+        # Compute tracking loss at this timestep
+        v_i = verts_xy[target_index]
+        dv = v_i - target[i]
+        L_total += 0.5 * float(dv @ dv) * dlam
+    
+    return L_total
+
+
+# =============================================================================
+# SPSA gradient estimator for trajectory tracking
+# =============================================================================
+def compute_dL_dtheta_spsa(
+    policy_model: torch.nn.Module,
+    lams: torch.Tensor,                 # (T,)
+    sim_manager,
+    target: np.ndarray,                 # (T, 2) - target trajectory
+    target_index: int,                  # node index to track
+    dlam: float,
+    spsa_c: float = 5e-3,               # perturbation magnitude
+    spsa_m: int = 2,                    # number of SPSA pairs to average
+    generator: Optional[torch.Generator] = None,  # for reproducible deltas
+    fail_loss: float = 1e6,
+):
+    """
+    SPSA (Simultaneous Perturbation Stochastic Approximation) gradient estimator
+    for trajectory tracking.
+    
+    Returns:
+      grads_list : list[Tensor] grads wrt policy_model params (same order as params)
+      L_total    : float loss at current (unperturbed) theta
+    """
+    params = [p for p in policy_model.parameters() if p.requires_grad]
+    theta0 = parameters_to_vector(params)
+
+    # Loss at current theta (for logging)
+    with torch.no_grad():
+        set_params_from_vector_(params, theta0)
+        L_total = loss_only_forward(policy_model, lams, sim_manager, target, target_index, dlam, fail_loss=fail_loss)
+
+    # SPSA gradient estimate
+    ghat = torch.zeros_like(theta0)
+    eps = 1e-12
+    c = float(spsa_c)
+    if c <= 0:
+        raise ValueError("spsa_c must be > 0")
+
+    for _ in range(int(spsa_m)):
+        # Rademacher Δ ∈ {±1}^d (same dtype/device as theta0)
+        delta = torch.empty_like(theta0)
+        if generator is None:
+            delta.bernoulli_(0.5)
+        else:
+            delta.bernoulli_(0.5, generator=generator)
+        delta.mul_(2).sub_(1)  # {0,1} -> {-1,+1}
+
+        with torch.no_grad():
+            # θ + cΔ
+            set_params_from_vector_(params, theta0 + c * delta)
+            Lp = loss_only_forward(policy_model, lams, sim_manager, target, target_index, dlam, fail_loss=fail_loss)
+
+            # θ - cΔ
+            set_params_from_vector_(params, theta0 - c * delta)
+            Lm = loss_only_forward(policy_model, lams, sim_manager, target, target_index, dlam, fail_loss=fail_loss)
+
+        ghat.add_(((Lp - Lm) / (2.0 * c + eps)) * delta)
+
+    ghat.div_(float(spsa_m))
+
+    # Restore original params
+    with torch.no_grad():
+        set_params_from_vector_(params, theta0)
+
+    grads_list = vector_to_grads_list(params, ghat)
+    return grads_list, float(L_total)
+
+
+def reinit_net_(net: nn.Module):
+    def _init(m):
+        if isinstance(m, nn.Linear):
+            nn.init.kaiming_uniform_(m.weight, a=math.sqrt(5))
+            nn.init.zeros_(m.bias)
+    net.apply(_init)
+
+    with torch.no_grad():
+        for name in ["log_mag", "log_mag_xy", "log_mag_a", "rho_xy", "rho_a", "log_metric"]:
+            if hasattr(net, name):
+                getattr(net, name).zero_()
+
+
+if __name__ == "__main__":
+    configure_threads(1)
+    set_seed(42)
+    device = torch.device("cpu")
+
+    # Simulator setup
+    sim_manager = py_der.SimulationManager()
+    sim_manager.configure({
+        "youngM": 1e5,
+        "Poisson": 0.5,
+        "density": 1000,
+        "deltaTime": 0.01,
+        "totalTime": 10.0,
+        "gVector": np.array([0, 0, -0.0]),
+        "viscosity": 0.000,
+        "tol": 1e-4,
+        "maxIter": 10000,
+        "stol": 1e-4,
+        "rodRadius": 1e-3,
+        "geometry_file": "vertices.txt",
+        "d_h": 0.001,
+        "col_limit": 0.01,
+        "k_scaler": 1.0,
+    })
+
+    controller_type = [0, 0, 0, 0]
+    control_dofs = [0, 1, 99, 100]
+    control_info = np.array([controller_type, control_dofs]).T
+    sim_manager.defineController(control_info)
+    resetSim(sim_manager)
+
+    verts_init = np.asarray(sim_manager.getAllVertices()).copy()
+    N = verts_init.shape[0]
+
+    # Load configuration parameters
+    trajectory_types = CONFIG["trajectory_types"]
+    trajectory_params = CONFIG["trajectory_params"]
+    target_index = CONFIG["target_index"]
+    T = CONFIG["T"]
+    learning_rate = CONFIG["learning_rate"]
+    iteration_number = CONFIG["iteration_number"]
+    loss_threshold = CONFIG["loss_threshold"]
+    hidden_sizes = CONFIG["hidden_sizes"]
+    spsa_c = CONFIG["spsa_c"]
+    spsa_m = CONFIG["spsa_m"]
+
+    # Time discretization
+    lams_np = np.linspace(0, 1, T).astype(np.float32)
+    lams = torch.tensor(lams_np, dtype=torch.float32, device=device)
+    dlam = float(lams_np[1] - lams_np[0])
+
+    bounds = torch.tensor([0.1 / dlam, 0.1 / dlam], dtype=torch.float32)
+
+    # Store results for all trajectories
+    all_results = []
+
+    print(f"\n{'='*60}")
+    print(f"Testing {len(trajectory_types)} trajectory types (SPSA)")
+    print(f"SPSA perturbation (c): {spsa_c}")
+    print(f"SPSA pairs (m): {spsa_m}")
+    print(f"{'='*60}\n")
+
+    for traj_idx, trajectory_type in enumerate(trajectory_types):
+        # Reset seed for each trajectory to ensure fair comparison
+        set_seed(42)
+        
+        # SPSA generator for reproducible random perturbations
+        spsa_gen = torch.Generator(device=device)
+        spsa_gen.manual_seed(123 + traj_idx)  # different seed for each trajectory
+        
+        # Generate target trajectory
+        middle_node = verts_init[target_index, :].copy()
+        target = generate_trajectory(trajectory_type, middle_node, T, trajectory_params)
+        traj_desc = get_trajectory_description(trajectory_type, trajectory_params)
+
+        # Print configuration
+        print(f"\n{'='*60}")
+        print(f"[{traj_idx+1}/{len(trajectory_types)}] Trajectory: {traj_desc}")
+        print(f"  Target node index: {target_index}")
+        print(f"  Number of time steps: {T}")
+        print(f"  Number of iterations: {iteration_number}")
+        print(f"{'='*60}\n")
+
+        # Create fresh network and optimizer for each trajectory
+        net = create_policy_model(
+            input_size=1,
+            hidden_sizes=hidden_sizes,
+            output_size=2,
+            bounds=bounds,
+        ).to(device)
+
+        optimizer = torch.optim.Adam([p for p in net.parameters() if p.requires_grad], lr=learning_rate)
+
+        loss_hist = []
+        epoch_dt_hist = []
+        position_history = []  # Store middle point position at each epoch
+
+        best_loss = float("inf")
+        best_state = None
+
+        # Training loop
+        total_start_time = time.perf_counter()
+
+        for epoch in range(iteration_number):
+            t0 = time.perf_counter()
+
+            optimizer.zero_grad(set_to_none=True)
+
+            grads_list, loss = compute_dL_dtheta_spsa(
+                net,
+                lams,
+                sim_manager,
+                target,
+                target_index,
+                dlam,
+                spsa_c=spsa_c,
+                spsa_m=spsa_m,
+                generator=spsa_gen,
+                fail_loss=1e6,
+            )
+
+            params = [p for p in net.parameters() if p.requires_grad]
+            for p, g in zip(params, grads_list):
+                p.grad = g.detach()
+
+            torch.nn.utils.clip_grad_norm_(params, 10.0)
+            optimizer.step()
+
+            loss_val = float(loss)
+            loss_hist.append(loss_val)
+            
+            # Collect middle point positions at each time step for this epoch
+            # Run forward rollout to get vertices
+            sim_manager.resetSim()
+            verts0 = np.asarray(sim_manager.getAllVertices()).copy()[:, :2]
+            xb_k = verts0[[0, 1, -2, -1], :].reshape(-1).copy()
+            u_seq = net(lams.view(T, 1)).cpu().detach().numpy()
+            epoch_positions = []
+            for i in range(T):
+                uk = u_seq[i]
+                dx1, dx2 = uk * dlam
+                v0 = xb_k[0:2].copy()
+                v1 = xb_k[2:4].copy()
+                v2 = xb_k[4:6].copy()
+                v3 = xb_k[6:8].copy()
+                v0[0] += dx1; v1[0] += dx1
+                v2[0] += dx2; v3[0] += dx2
+                xb_k = np.hstack((v0, v1, v2, v3))
+                sim_manager.setControlInputs(np.ascontiguousarray(xb_k.reshape(-1, 2), dtype=np.float64))
+                sim_manager.step()
+                verts_xy = np.asarray(sim_manager.getAllVertices()).copy()[:, :2]
+                epoch_positions.append(verts_xy[target_index].tolist())
+            position_history.append(epoch_positions)
+
+            epoch_dt = time.perf_counter() - t0
+            epoch_dt_hist.append(epoch_dt)
+
+            if loss_val < best_loss:
+                best_loss = loss_val
+                best_state = {
+                    "epoch": epoch,
+                    "best_loss": best_loss,
+                    "model_state_dict": copy.deepcopy(net.state_dict()),
+                    "optimizer_state_dict": copy.deepcopy(optimizer.state_dict()),
+                    "lams": lams_np.copy(),
+                    "target": target.copy(),
+                    "target_index": target_index,
+                }
+
+            grad_norm = float(torch.sqrt(sum((g.detach() ** 2).sum() for g in grads_list)).cpu())
+            print(f"Epoch {epoch:03d} | Loss {loss_val:.6e} | grad_norm {grad_norm:.3e} | dt {epoch_dt*1e3:.1f} ms")
+
+            if loss_val < loss_threshold:
+                print(f"\nReached loss threshold at epoch {epoch}")
+                break
+
+        total_time = time.perf_counter() - total_start_time
+        avg_epoch_time = np.mean(epoch_dt_hist)
+
+        print(f"\n{'='*60}")
+        print(f"[{trajectory_type}] Training completed!")
+        print(f"  Total time: {total_time:.3f} s")
+        print(f"  Best loss: {best_loss:.6e}")
+        print(f"  Average epoch time: {avg_epoch_time*1e3:.3f} ms")
+        print(f"{'='*60}\n")
+
+        # Store results
+        all_results.append({
+            "trajectory_type": trajectory_type,
+            "trajectory_desc": traj_desc,
+            "total_time": total_time,
+            "best_loss": best_loss,
+            "best_epoch": best_state['epoch'] if best_state else -1,
+            "avg_epoch_time": avg_epoch_time,
+            "total_epochs": len(loss_hist),
+            "position_history": position_history,
+        })
+
+    # Save all results to current script directory
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    output_file = os.path.join(script_dir, "middle_tracking_spsa.txt")
+
+    # Save summary to txt file
+    with open(output_file, "w") as f:
+        f.write("="*60 + "\n")
+        f.write("Summary Table (SPSA):\n")
+        f.write("="*60 + "\n")
+        f.write(f"SPSA perturbation (c): {spsa_c}\n")
+        f.write(f"SPSA pairs (m): {spsa_m}\n")
+        f.write("-"*65 + "\n")
+        f.write(f"{'Trajectory':<20} {'Total Time (s)':<15} {'Best Loss':<15} {'Avg Epoch (ms)':<15}\n")
+        f.write("-"*65 + "\n")
+        for result in all_results:
+            f.write(f"{result['trajectory_type']:<20} {result['total_time']:<15.4f} {result['best_loss']:<15.6e} {result['avg_epoch_time']*1e3:<15.3f}\n")
+        f.write("-"*65 + "\n")
+        
+        # Compute averages
+        avg_total_time = np.mean([r['total_time'] for r in all_results])
+        avg_best_loss = np.mean([r['best_loss'] for r in all_results])
+        avg_epoch_time_all = np.mean([r['avg_epoch_time'] for r in all_results])
+        
+        f.write(f"{'AVERAGE':<20} {avg_total_time:<15.4f} {avg_best_loss:<15.6e} {avg_epoch_time_all*1e3:<15.3f}\n")
+        f.write("="*60 + "\n")
+
+    print(f"\n{'='*60}")
+    print(f"Overall Averages (SPSA):")
+    print(f"  Average total time: {avg_total_time:.4f} s")
+    print(f"  Average best loss: {avg_best_loss:.6e}")
+    print(f"  Average epoch time: {avg_epoch_time_all*1e3:.3f} ms")
+    print(f"{'='*60}")
+    print(f"\nAll results saved to {output_file}")
+    
+    # Save per-step middle point positions for each case to txt files
+    for traj_idx, result in enumerate(all_results):
+        traj_type = result['trajectory_type']
+        position_hist = result['position_history']
+        pos_file = os.path.join(script_dir, f"middle_tracking_spsa_case{traj_idx}_{traj_type}_positions.txt")
+        with open(pos_file, "w") as f:
+            f.write("# Per-step middle point position history for middle_tracking_spsa\n")
+            f.write(f"# Case {traj_idx}: Trajectory type = {traj_type}\n")
+            f.write(f"# Target node index: {target_index}\n")
+            f.write("# Format: Epoch, TimeStep, X, Y\n")
+            for epoch_idx, epoch_positions in enumerate(position_hist):
+                for step_idx, (x, y) in enumerate(epoch_positions):
+                    f.write(f"{epoch_idx}, {step_idx}, {x:.10e}, {y:.10e}\n")
+        print(f"Position history saved to: {pos_file}")
