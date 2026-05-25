@@ -104,7 +104,7 @@ If you find this work useful, please cite:
 ```bibtex
 @inproceedings{neuralcontrol2026,
   title     = {Neural Control: Adjoint Learning Through Equilibrium Constraints},
-  author    = {Author One and Author Two and Author Three and Author Four},
+  author    = {Dezhong Tong, Jiawen Wang, Hengyi Zhou, Yinlong Shen, Xiaonan Huang, M. Khalid Jawed},
   booktitle = {Proceedings of the International Conference on Machine Learning (ICML)},
   year      = {2026}
 }
