@@ -1,14 +1,21 @@
 ## [Neural Control: Adjoint Learning Through Equilibrium Constraints](https://github.com/StructuresComp/neural-control/index.html)
 
-This repository contains the C++ simulator, Python
-learning scripts and website codes.
+We present Neural Control, an adjoint-based learning framework
+for controlling soft, deformable structures whose dynamics are governed by static
+equilibrium constraints. By differentiating through the equilibrium via implicit
+differentiation and pairing it with receding-horizon control, our method avoids
+unrolling expensive forward simulations and scales to high-dimensional shape
+objectives. We validate the approach on three representative tasks &mdash; node
+targeting, trajectory tracing, and shape control &mdash; where it achieves
+orders-of-magnitude lower tracking error at a fraction of the compute cost of
+derivative-free baselines.
+
+Go to our [website](https://github.com/StructuresComp/neural-control/index.html) for more details.
 
 The simulator is exposed to Python through
 `pybind11` as the module `nn_der`. The simulation codes are in `src/` and the learning scripts in
 `learning_scripts/`. These python scripts use different method to solve the gradient for the three
 control tasks reported in the paper.
-
-Here's our [website](https://github.com/StructuresComp/neural-control/index.html).
 
 ***
 
